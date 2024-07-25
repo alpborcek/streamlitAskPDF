@@ -10,7 +10,6 @@ from langchain_huggingface import HuggingFaceEmbeddings
 import os
 import pickle
 import hashlib
-import torch
 
 
 def get_pdf_text(pdf_docs):
@@ -24,21 +23,23 @@ def get_pdf_text(pdf_docs):
 
 def get_text_chunks(text):
     text_splitter = CharacterTextSplitter(
-        separator="\n", chunk_size=1000, chunk_overlap=200, length_function=len
+        separator="\n", chunk_size=2000, chunk_overlap=200, length_function=len
     )
     chunks = text_splitter.split_text(text)
     return chunks
 
 
-def get_vectorstore(text_chunks):
-    device = "cpu"  # Default to CPU
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={"device": device},
-        encode_kwargs={"normalize_embeddings": True},
+def precompute_and_save_embeddings(text_chunks, embeddings_model, file_path):
+    text_embeddings = list(
+        zip(text_chunks, embeddings_model.embed_documents(text_chunks))
     )
-    vectorstore = FAISS.from_texts(texts=text_chunks, embedding=embeddings)
-    return vectorstore, embeddings
+    with open(file_path, "wb") as f:
+        pickle.dump(text_embeddings, f)
+
+
+def load_precomputed_embeddings(file_path):
+    with open(file_path, "rb") as f:
+        return pickle.load(f)
 
 
 def save_vectorstore(vectorstore, file_path):
@@ -75,8 +76,6 @@ def hash_file(file):
 
 def get_conversation_chain(vectorstore):
     llm = Ollama(model="llama2-uncensored")
-    # llm = HuggingFaceHub(repo_id="google/flan-t5-xxl", model_kwargs={"temperature":0.5, "max_length":512})
-
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
     conversation_chain = ConversationalRetrievalChain.from_llm(
         llm=llm, retriever=vectorstore.as_retriever(), memory=memory
@@ -85,6 +84,10 @@ def get_conversation_chain(vectorstore):
 
 
 def handle_userinput(user_question):
+    if not st.session_state.conversation:
+        st.write("Please process the documents first.")
+        return
+
     response = st.session_state.conversation({"question": user_question})
     st.session_state.chat_history = response["chat_history"]
 
@@ -113,6 +116,7 @@ def main():
 
     pdf_metadata = load_embeddings_and_chunks()
     combined_text_chunks = []
+    combined_text_embeddings = []
     embeddings_model = None
 
     with st.sidebar:
@@ -133,27 +137,40 @@ def main():
                         text_chunks = get_text_chunks(raw_text)
                         combined_text_chunks.extend(text_chunks)
 
-                        # create vector store
-                        vectorstore, embeddings_model = get_vectorstore(text_chunks)
-
-                        # save vector store
-                        vectorstore_path = f"data/{pdf_hash}"
-                        save_vectorstore(vectorstore, vectorstore_path)
+                        # precompute embeddings and save them
+                        embeddings_file_path = f"data/{pdf_hash}_embeddings.pkl"
+                        if not os.path.exists(embeddings_file_path):
+                            device = "cpu"
+                            embeddings_model = HuggingFaceEmbeddings(
+                                model_name="sentence-transformers/all-MiniLM-L6-v2",
+                                model_kwargs={"device": device},
+                                encode_kwargs={"normalize_embeddings": True},
+                            )
+                            precompute_and_save_embeddings(
+                                text_chunks, embeddings_model, embeddings_file_path
+                            )
 
                         # save metadata
                         new_metadata[pdf_hash] = {
                             "filename": pdf.name,
                             "chunks": text_chunks,
-                            "vectorstore_path": vectorstore_path,
+                            "embeddings_path": embeddings_file_path,
                         }
                         pdf_metadata[pdf_hash] = new_metadata[pdf_hash]
 
                 # save embeddings and chunks
                 save_embeddings_and_chunks(pdf_metadata)
 
+                # load all precomputed embeddings
+                for metadata in pdf_metadata.values():
+                    text_embeddings = load_precomputed_embeddings(
+                        metadata["embeddings_path"]
+                    )
+                    combined_text_embeddings.extend(text_embeddings)
+
                 # create combined vector store
-                combined_vectorstore, embeddings_model = get_vectorstore(
-                    combined_text_chunks
+                combined_vectorstore = FAISS.from_embeddings(
+                    text_embeddings=combined_text_embeddings, embedding=embeddings_model
                 )
                 save_vectorstore(combined_vectorstore, "data/combined_vectorstore")
 
@@ -162,9 +179,10 @@ def main():
                 )
 
         elif os.path.exists("data/combined_vectorstore"):
+            device = "cpu"
             embeddings_model = HuggingFaceEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2",
-                model_kwargs={"device": "cpu"},  # Use CPU as default
+                model_kwargs={"device": device},
                 encode_kwargs={"normalize_embeddings": True},
             )
             combined_vectorstore = load_vectorstore(

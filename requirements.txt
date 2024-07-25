@@ -2,10 +2,6 @@ streamlit
 PyPDF2 
 langchain
 langchain.text_splitters
-langchain_community.vectorstores
-langchain.memory
-langchain.chains
 htmlTemplates
-langchain_community.llms
 langchain_huggingface
 faiss-cpu

@@ -196,6 +196,7 @@ def main():
                 st.write(data["filename"])
 
     # Container at the bottom for user input
+    # TODO Remove this
     container = st.container()
     with container:
         user_question = st.text_input("Ask a question about your documents:")
